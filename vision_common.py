@@ -1,56 +1,14 @@
 """Utilitários compartilhados: regiões de interesse, configuração e geometria."""
 from __future__ import annotations
 
-import json
-import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 
-CONFIG_PATH = os.environ.get("EU_CONFIG", "config.json")
-
-DEFAULT_CONFIG: dict[str, Any] = {
-    "capture": {
-        # Índice da OBS Virtual Camera, ou URL/arquivo (ex.: "srt://127.0.0.1:9000").
-        "source": 0,
-        "width": 1920,
-        "height": 1080,
-        "buffer_size": 5,
-        "disconnect_timeout": 2.0,
-        "freeze_seconds": 3.0,
-        "freeze_threshold": 0.4,
-        "reconnect_delay": 1.0,
-    },
-    "regions": {
-        "battle_list": None,
-        "game_area": None,
-    },
-    "battle_list": {
-        "bar_full_width": None,
-        "min_bar_width": 1,
-        "bar_min_height": 2,
-        "bar_max_height": 6,
-        "name_height": 12,
-        "confirm_frames": 2,
-        "leave_grace_seconds": 1.0,
-        "ocr": True,
-    },
-    "detector": {
-        "templates_dir": "templates",
-        "threshold": 0.80,
-        "nms_iou": 0.3,
-        "scale": 1.0,
-        "min_hits": 2,
-        "max_missed_seconds": 0.8,
-        "match_distance": 48,
-    },
-    "fusion": {
-        "time_window": 2.0,
-        "retain_gone_seconds": 10.0,
-    },
-}
+# Configuração movida para config.py; reexportada aqui por compatibilidade.
+from config import CONFIG_PATH, DEFAULT_CONFIG, load_config, save_config  # noqa: E402,F401
 
 
 @dataclass(frozen=True)
@@ -85,30 +43,6 @@ class Region:
     @property
     def is_empty(self) -> bool:
         return self.w <= 0 or self.h <= 0
-
-
-def _deep_merge(base: dict, override: dict) -> dict:
-    out = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
-
-
-def load_config(path: str = CONFIG_PATH) -> dict[str, Any]:
-    if not os.path.exists(path):
-        return _deep_merge(DEFAULT_CONFIG, {})
-    with open(path, "r", encoding="utf-8") as fh:
-        return _deep_merge(DEFAULT_CONFIG, json.load(fh))
-
-
-def save_config(config: dict[str, Any], path: str = CONFIG_PATH) -> None:
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(config, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
 
 
 def select_region(image: np.ndarray, title: str) -> Optional[Region]:

@@ -1,4 +1,10 @@
 __pycache__/
 *.pyc
-config.json
 .pytest_cache/
+.venv/
+# Dados locais do usuário (configuração, logs, referências capturadas)
+config.json
+config.json.tmp
+config.json.corrompido
+logs/
+sio_identity.png

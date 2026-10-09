@@ -267,11 +267,129 @@ class FrameGrabber:
         return (t - self._last_change_at) >= self.freeze_seconds
 
 
-def grabber_from_config(cfg: dict) -> FrameGrabber:
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts", ".webm")
+
+
+class RecordedSource:
+    """Reproduz imagens gravadas (pasta de PNG/JPG ou arquivo de vídeo) em ritmo fixo.
+
+    Usada no modo de observação e nos testes: o restante do sistema recebe os
+    frames exatamente como receberia do OBS. ``fps`` controla o ritmo; com
+    ``loop=False`` a fonte termina no último quadro (a captura passa a
+    "desconectada", o que é o comportamento esperado ao fim da gravação).
+    """
+
+    def __init__(self, path: str, fps: float = 10.0, loop: bool = False,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.path = path
+        self.fps = max(0.1, float(fps))
+        self.loop = loop
+        self.sleep = sleep
+        self.files: list[str] = []
+        self._pos = 0
+        self._cap = None
+        self._next_at = 0.0
+        self.finished = False
+
+    @staticmethod
+    def is_recording(path: Union[int, str]) -> bool:
+        import os
+
+        if not isinstance(path, str) or path.isdigit() or "://" in path:
+            return False
+        return os.path.isdir(path) or path.lower().endswith(IMAGE_EXTENSIONS + VIDEO_EXTENSIONS)
+
+    def open(self) -> bool:
+        import os
+
+        import cv2
+
+        self.close()
+        if self.finished and not self.loop:
+            return False
+        self._pos = 0
+        if os.path.isdir(self.path):
+            self.files = sorted(os.path.join(self.path, f) for f in os.listdir(self.path)
+                                if f.lower().endswith(IMAGE_EXTENSIONS))
+            return bool(self.files)
+        if self.path.lower().endswith(IMAGE_EXTENSIONS):
+            self.files = [self.path] if os.path.exists(self.path) else []
+            return bool(self.files)
+        cap = cv2.VideoCapture(self.path)
+        if not cap.isOpened():
+            cap.release()
+            return False
+        self._cap = cap
+        return True
+
+    def read(self) -> tuple[bool, Optional[np.ndarray]]:
+        import cv2
+
+        now = time.monotonic()
+        if self._next_at > now:
+            self.sleep(self._next_at - now)
+        self._next_at = max(now, self._next_at) + 1.0 / self.fps
+        if self._cap is not None:
+            ok, img = self._cap.read()
+            if not ok and self.loop:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, img = self._cap.read()
+            if not ok:
+                self.finished = True
+            return (bool(ok) and img is not None), img
+        if self._pos >= len(self.files):
+            if not self.loop or not self.files:
+                self.finished = True
+                return False, None
+            self._pos = 0
+        img = cv2.imread(self.files[self._pos], cv2.IMREAD_COLOR)
+        self._pos += 1
+        return img is not None, img
+
+    def close(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
+def source_from_config(cfg: dict) -> FrameSource:
     c = cfg["capture"]
-    source = OBSVideoSource(c["source"], c.get("width"), c.get("height"))
+    src = c["source"]
+    if RecordedSource.is_recording(src):
+        return RecordedSource(src, c.get("playback_fps", 10.0), c.get("loop_playback", False))
+    return OBSVideoSource(src, c.get("width"), c.get("height"))
+
+
+def grabber_from_config(cfg: dict, on_status_change=None) -> FrameGrabber:
+    c = cfg["capture"]
+    source = source_from_config(cfg)
+    # Em gravações, quadros repetidos são legítimos (cena parada): o limiar de
+    # congelamento continua valendo, mas a desconexão só ocorre no fim do arquivo.
     return FrameGrabber(source, buffer_size=c["buffer_size"],
                         disconnect_timeout=c["disconnect_timeout"],
                         freeze_seconds=c["freeze_seconds"],
                         freeze_threshold=c["freeze_threshold"],
-                        reconnect_delay=c["reconnect_delay"])
+                        reconnect_delay=c["reconnect_delay"],
+                        on_status_change=on_status_change)
+
+
+def iter_recording(path: str, step: int = 1):
+    """Itera todos os quadros de uma gravação (pasta de imagens ou vídeo) sem esperar.
+
+    ``step`` > 1 pula quadros (útil para vídeos longos).
+    """
+    src = RecordedSource(path, fps=1e9, loop=False, sleep=lambda _s: None)
+    if not src.open():
+        raise FileNotFoundError(f"gravação não encontrada ou vazia: {path}")
+    try:
+        i = 0
+        while True:
+            ok, img = src.read()
+            if not ok:
+                break
+            if i % max(1, step) == 0:
+                yield img
+            i += 1
+    finally:
+        src.close()

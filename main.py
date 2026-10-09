@@ -1,13 +1,16 @@
-"""Ponto de entrada: seleção de regiões, cadastro de templates e modo de inspeção.
+"""Ponto de entrada.
 
 Uso:
-  python main.py select-region battle_list
-  python main.py select-region game_area
+  python main.py                      # interface gráfica (padrão)
+  python main.py gui [--no-connect]
+  python main.py select-region minimap|battle_list|game_area|hp_bar|sio|sio_name
   python main.py add-template "Rat" [--image arquivo.png] [--threshold 0.85]
-  python main.py run [--no-window]
+  python main.py run [--no-window]    # inspeção da Battle List/detecções em janela OpenCV
+  python main.py observe --route "Minha rota" --recording pasta_ou_video
+  python main.py analyze --recording pasta_ou_video   # HP/SIO/Battle sobre uma gravação
 
-O modo ``run`` apenas observa e exibe resultados; não envia teclas nem
-cliques ao jogo.
+Nada aqui envia teclas ou cliques ao jogo: os módulos observam a imagem do
+OBS e exibem/registram o que foi reconhecido.
 """
 from __future__ import annotations
 
@@ -22,8 +25,11 @@ import numpy as np
 from battle_attack import BattleListReader, BattleListTracker
 from monster_detector import MonsterDetector, TemplateLibrary, VisualTracker
 from obs_capture import CaptureStatus, grabber_from_config
+from logger import EVENTS, setup_logging
 from target_fusion import TargetFusion, TargetStatus
 from vision_common import Region, load_config, save_config, select_region
+
+REGION_NAMES = ["minimap", "battle_list", "game_area", "hp_bar", "sio", "sio_name"]
 
 STATUS_COLORS = {
     TargetStatus.CONFIRMED: (0, 200, 0),
@@ -153,21 +159,81 @@ def cmd_run(args, cfg) -> None:
         cv2.destroyAllWindows()
 
 
+def cmd_gui(args, cfg) -> None:
+    from config import ConfigStore
+    from interface import run_gui
+
+    sys.exit(run_gui(ConfigStore(), autoconnect=not getattr(args, "no_connect", False)))
+
+
+def cmd_observe(args, cfg) -> None:
+    """Testa uma rota com imagens gravadas e imprime o relatório."""
+    from cave_navigation import MinimapLocalizer
+    from cavebot import run_observation
+    from obs_capture import iter_recording
+    from route_manager import RouteError, RouteManager
+
+    try:
+        route = RouteManager(cfg["cavebot"]["routes_dir"]).load(args.route)
+    except RouteError as exc:
+        sys.exit(str(exc))
+    for p in route.validate():
+        print(f"aviso: {p}")
+    localizer = MinimapLocalizer.from_config(cfg)
+    c = cfg["cavebot"]
+    report = run_observation(route, iter_recording(args.recording, args.step), localizer,
+                             c["confirm_frames"], c["lost_pause_seconds"], fps=args.fps / args.step)
+    print(report.summary())
+
+
+def cmd_analyze(args, cfg) -> None:
+    """Roda HP, SIO e Battle sobre uma gravação e imprime os eventos."""
+    from analysis import AnalysisEngine
+    from config import ConfigStore
+    from obs_capture import iter_recording
+
+    store = ConfigStore()
+    engine = AnalysisEngine(store)
+    engine.set_enabled("cavebot", False)
+    EVENTS.subscribe(lambda ev: print(ev.format()))
+    for i, img in enumerate(iter_recording(args.recording, args.step)):
+        snap = engine.process(img, i * args.step / args.fps, i)
+        if args.verbose and snap.health is not None:
+            print(f"frame {i}: {snap.health.describe()}")
+
+
 def main(argv=None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    cfg = load_config()
+    setup_logging(cfg)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("select-region")
-    s.add_argument("name", choices=["battle_list", "game_area"])
-    a = sub.add_parser("add-template")
+    sub = p.add_subparsers(dest="cmd")
+    g = sub.add_parser("gui", help="interface gráfica (padrão)")
+    g.add_argument("--no-connect", action="store_true", help="não conectar ao OBS ao abrir")
+    s = sub.add_parser("select-region", help="selecionar região com janela OpenCV")
+    s.add_argument("name", choices=REGION_NAMES)
+    a = sub.add_parser("add-template", help="cadastrar referência visual de monstro")
     a.add_argument("name")
     a.add_argument("--image")
     a.add_argument("--threshold", type=float)
-    r = sub.add_parser("run")
+    r = sub.add_parser("run", help="inspeção da Battle List e detecções (OpenCV)")
     r.add_argument("--no-window", action="store_true")
+    o = sub.add_parser("observe", help="testar rota com imagens gravadas")
+    o.add_argument("--route", required=True)
+    o.add_argument("--recording", required=True)
+    o.add_argument("--fps", type=float, default=10.0, help="quadros por segundo da gravação")
+    o.add_argument("--step", type=int, default=1, help="processar 1 a cada N quadros")
+    z = sub.add_parser("analyze", help="HP/SIO/Battle sobre uma gravação")
+    z.add_argument("--recording", required=True)
+    z.add_argument("--fps", type=float, default=10.0)
+    z.add_argument("--step", type=int, default=1)
+    z.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
-    cfg = load_config()
-    {"select-region": cmd_select_region, "add-template": cmd_add_template, "run": cmd_run}[args.cmd](args, cfg)
+    handlers = {"gui": cmd_gui, "select-region": cmd_select_region, "add-template": cmd_add_template,
+                "run": cmd_run, "observe": cmd_observe, "analyze": cmd_analyze}
+    try:
+        handlers[args.cmd or "gui"](args, cfg)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
