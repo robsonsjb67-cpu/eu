@@ -119,3 +119,17 @@ class _NullSource:
     def open(self): return False
     def read(self): return False, None
     def close(self): pass
+
+
+def test_engine_maps_while_running(tmp_path):
+    eng = AnalysisEngine(store(tmp_path))
+    w = world_map()
+    eng.mapper.start()
+    for i in range(10):
+        snap = eng.process(frame(w, (100 + i, 100)), i * 0.1)
+    assert snap.map_update.status == "added"
+    assert eng.mapper.floor_map.frames == 10
+    eng.rebuild()                       # mudar configuração não apaga o mapa
+    assert eng.mapper.floor_map.frames == 10
+    eng.emergency_stop()
+    assert not eng.mapper.active

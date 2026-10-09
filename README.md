@@ -20,6 +20,7 @@ temporizadores de magias.
 | `analysis.py` | Motor que entrega cada frame aos módulos; cada módulo roda isolado (um erro não derruba os outros). |
 | `route_manager.py` | Rotas e waypoints: criar, editar, ordenar, salvar/carregar/renomear/excluir em JSON, validação. |
 | `cave_navigation.py` | Referências do minimapa, estimativa de posição com limiar e checagem de ambiguidade, perda de referência, suspeita de troca de andar, calibração da região. |
+| `map_builder.py` | Mapeador: junta os prints do minimapa num mapa por andar, detecta troca de andar, calibração de coordenadas, salva PNG e gera referência do CaveBot. |
 | `cavebot.py` | Acompanha a rota: waypoint atual/próximo/progresso, iniciar/pausar/continuar/parar, conclusão só por reconhecimento visual, pausa automática sem posição confiável, registro de falhas, modo de observação com gravações. |
 | `battle_attack.py` | Battle List: linhas, barras de vida, nomes (OCR opcional), entradas/saídas, sem contagem duplicada. |
 | `monster_detector.py` | Detecção de monstros na área de jogo por referências visuais (templates com máscara, NMS, rastreamento temporal). |
@@ -115,6 +116,36 @@ referências de monstros em `templates/` e o log em `logs/eu.log`.
 - `cavebot.pixels_per_sqm` converte pixels do minimapa em sqm e depende do zoom do minimapa e
   da escala do OBS. Para calibrar: ande N sqm em linha reta e veja o deslocamento em pixels
   exibido em *Posição*; `pixels_per_sqm = pixels / N`.
+
+## Mapeador (montar o mapa com prints do minimapa)
+
+Aba **Mapa**: o programa vai juntando os prints do minimapa num mapa grande, como o
+mapa do Tibia, separado por andar.
+
+1. Defina a região do **Minimapa** (aba Regiões).
+2. Clique em **Iniciar mapeamento** e ande pelo local. Cada print é encaixado no mapa
+   (o ponto vermelho é você). Áreas pretas (inexploradas) e a cruz do personagem não
+   apagam o que já foi mapeado.
+3. Ao subir/descer escada, o print deixa de encaixar; depois de alguns prints começa um
+   novo mapa (`andar_2`…). Ao voltar, ele reencontra o andar já mapeado. **Novo andar**
+   força isso e permite dar nome.
+4. (Opcional) **Calibrar posição atual…**: informe a coordenada do jogo (x, y, z) onde o
+   personagem está — a partir daí o mapa mostra coordenadas. Sem calibração não há
+   coordenadas, só o desenho.
+5. **Salvar mapa** grava `maps/<rota>/andar_N.png` (fundo transparente) + `meta.json`.
+   **Abrir mapa…** carrega e permite continuar mapeando.
+6. **Usar como referência do CaveBot**: o mapa inteiro vira uma referência, e o CaveBot
+   reconhece a posição em qualquer ponto mapeado (com coordenadas, se calibrado).
+
+Também dá para montar o mapa a partir de prints gravados (botão **Gravar frames** ou
+vídeo do OBS): **Montar de gravação…** na aba Mapa, ou
+
+```powershell
+python main.py build-map --recording prints\gravacao_20261009_150000 --out maps\caverna --calibrate 32369,32241,7
+```
+
+(`--calibrate` = coordenada do **último** print da gravação.) Ajustes em `config.json`,
+seção `map`: `match_threshold`, `search_margin`, `new_floor_after`.
 
 ## Modo de observação (testar rotas com gravações)
 

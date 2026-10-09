@@ -8,6 +8,7 @@ Uso:
   python main.py run [--no-window]    # inspeção da Battle List/detecções em janela OpenCV
   python main.py observe --route "Minha rota" --recording pasta_ou_video
   python main.py analyze --recording pasta_ou_video   # HP/SIO/Battle sobre uma gravação
+  python main.py build-map --recording pasta_ou_video --out maps/caverna  # mapa com os prints
 
 Nada aqui envia teclas ou cliques ao jogo: os módulos observam a imagem do
 OBS e exibem/registram o que foi reconhecido.
@@ -202,6 +203,25 @@ def cmd_analyze(args, cfg) -> None:
             print(f"frame {i}: {snap.health.describe()}")
 
 
+def cmd_build_map(args, cfg) -> None:
+    """Monta o mapa juntando os prints do minimapa de uma gravação."""
+    from map_builder import MapBuilder, build_from_frames
+    from obs_capture import iter_recording
+
+    region = Region.from_any(cfg["regions"].get("minimap"))
+    if region is None:
+        sys.exit("Defina a região do minimapa antes (python main.py select-region minimap).")
+    builder = MapBuilder.from_config(cfg)
+    builder, counts = build_from_frames(iter_recording(args.recording, args.step), region.crop, builder)
+    print("Prints: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if args.calibrate:
+        x, y, z = (int(v) for v in args.calibrate.split(","))
+        builder.calibrate(x, y, z)
+        print(f"Calibrado: último print = {x},{y},{z}")
+    for path in builder.save(args.out):
+        print(f"salvo: {path}")
+
+
 def main(argv=None) -> None:
     cfg = load_config()
     setup_logging(cfg)
@@ -227,9 +247,15 @@ def main(argv=None) -> None:
     z.add_argument("--fps", type=float, default=10.0)
     z.add_argument("--step", type=int, default=1)
     z.add_argument("--verbose", action="store_true")
+    b = sub.add_parser("build-map", help="montar mapa com os prints do minimapa de uma gravação")
+    b.add_argument("--recording", required=True)
+    b.add_argument("--out", default="maps/mapa")
+    b.add_argument("--step", type=int, default=1)
+    b.add_argument("--calibrate", help="coordenada do ÚLTIMO print: x,y,z")
     args = p.parse_args(argv)
     handlers = {"gui": cmd_gui, "select-region": cmd_select_region, "add-template": cmd_add_template,
-                "run": cmd_run, "observe": cmd_observe, "analyze": cmd_analyze}
+                "run": cmd_run, "observe": cmd_observe, "analyze": cmd_analyze,
+                "build-map": cmd_build_map}
     try:
         handlers[args.cmd or "gui"](args, cfg)
     except KeyboardInterrupt:

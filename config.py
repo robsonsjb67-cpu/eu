@@ -116,6 +116,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "alert_sound": True,
         "alert_cooldown_seconds": 3.0,
     },
+    "map": {
+        "maps_dir": "maps",
+        # Semelhança mínima para encaixar um print do minimapa no mapa.
+        "match_threshold": 0.85,
+        # Quantos pixels ao redor da última posição procurar o próximo print.
+        "search_margin": 40,
+        # Prints seguidos sem encaixe antes de começar um andar/segmento novo.
+        "new_floor_after": 5,
+    },
     "spell_timers": {
         "timers": [
             {"name": "Utani Gran Hur", "seconds": 30.0, "warn_seconds": 5.0, "sound": True},

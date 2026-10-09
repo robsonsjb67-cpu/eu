@@ -20,6 +20,7 @@ from cavebot import CaveBot, CaveBotStatus
 from config import ConfigStore
 from health_monitor import HealthMonitor, HealthReading
 from logger import record_event
+from map_builder import MapBuilder, MapUpdate
 from monster_detector import MonsterDetector, TemplateLibrary, VisualTrack, VisualTracker
 from obs_capture import CaptureStatus
 from sio_monitor import SioMonitor, SioReading
@@ -44,6 +45,7 @@ class Snapshot:
     visual_tracks: list[VisualTrack] = field(default_factory=list)
     health: Optional[HealthReading] = None
     sio: Optional[SioReading] = None
+    map_update: Optional[MapUpdate] = None
     errors: dict[str, str] = field(default_factory=dict)
     elapsed_ms: float = 0.0
 
@@ -57,6 +59,8 @@ class AnalysisEngine:
         self._error_logged: dict[str, float] = {}
         self.timers = TimerManager.from_config(store.data)
         self.cavebot: Optional[CaveBot] = None
+        # O mapa em construção sobrevive aos rebuilds (só os parâmetros mudam).
+        self.mapper = MapBuilder.from_config(store.data)
         # Ouvintes de alerta (nível, mensagem) religados a cada rebuild do HP/SIO.
         self.alert_listeners: list = []
         self.rebuild()
@@ -66,6 +70,11 @@ class AnalysisEngine:
         """Recria módulos a partir da configuração (após mudar regiões/limiares)."""
         cfg = self.store.data
         with self.lock:
+            if which in (None, "cavebot", "map") and hasattr(self, "mapper"):
+                fresh = MapBuilder.from_config(cfg)
+                for attr in ("pixels_per_sqm", "match_threshold", "search_margin", "min_detail",
+                             "new_floor_after"):
+                    setattr(self.mapper, attr, getattr(fresh, attr))
             if which in (None, "cavebot"):
                 lib = ReferenceLibrary(cfg["cavebot"]["references_dir"])
                 self.localizer = MinimapLocalizer.from_config(cfg, lib)
@@ -105,6 +114,7 @@ class AnalysisEngine:
             self.halted = True
             if self.cavebot:
                 self.cavebot.stop()
+            self.mapper.stop()
             self.timers.stop_all()
         record_event("engine", "emergency_stop", "PARADA DE EMERGÊNCIA: análise interrompida, "
                      "CaveBot parado e temporizadores zerados", logging.CRITICAL)
@@ -124,6 +134,8 @@ class AnalysisEngine:
             self.timers.tick()
             if self.halted:
                 return snap
+            if self.mapper.active and capture_ok:
+                self._guard(snap, "map", self._run_map, image)
             if self.enabled["cavebot"]:
                 self._guard(snap, "cavebot", self._run_cavebot, image, t, capture_ok)
             if self.enabled["battle"] and capture_ok:
@@ -158,6 +170,9 @@ class AnalysisEngine:
         assert self.cavebot is not None
         self.cavebot.update(loc)
         snap.cavebot = self.cavebot.status()
+
+    def _run_map(self, snap: Snapshot, image: np.ndarray) -> None:
+        snap.map_update = self.mapper.update(self.localizer.crop(image))
 
     def _run_battle(self, snap: Snapshot, image: np.ndarray, t: float) -> None:
         if self.battle_reader.region is not None:

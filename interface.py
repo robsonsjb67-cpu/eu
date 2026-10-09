@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+                               QPushButton, QSizePolicy, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QVBoxLayout, QWidget)
 
 from analysis import AnalysisEngine, Snapshot
@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_regions_tab(), "Regiões")
         self.tabs.addTab(self._build_cavebot_tab(), "CaveBot")
+        self.tabs.addTab(self._build_map_tab(), "Mapa")
         self.tabs.addTab(self._build_battle_tab(), "Battle")
         self.tabs.addTab(self._build_health_tab(), "Cura / Suporte")
         self.tabs.addTab(self._build_timers_tab(), "Magias")
@@ -612,6 +613,193 @@ class MainWindow(QMainWindow):
         gl.addWidget(spin)
         self.timers_layout.addWidget(g)
         self._timer_widgets[timer.name] = {"label": lbl, "bar": bar, "state": state, "timer": timer}
+
+    def _build_map_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.addWidget(QLabel("Mapeamento automático: ande pelo local e o programa junta os prints do "
+                             "minimapa num mapa só (por andar). Defina antes a região do minimapa."))
+        row = QHBoxLayout()
+        for text, fn in (("Iniciar mapeamento", self._map_start), ("Pausar", self._map_stop),
+                         ("Novo andar", self._map_new_floor),
+                         ("Calibrar posição atual…", self._map_calibrate)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Ver:"))
+        self.map_floor_combo = QComboBox()
+        self.map_floor_combo.activated.connect(lambda _i: self._refresh_map_view(force=True))
+        row.addWidget(self.map_floor_combo, 1)
+        for text, fn in (("Salvar mapa", self._map_save), ("Abrir mapa…", self._map_load),
+                         ("Montar de gravação…", self._map_from_recording),
+                         ("Usar como referência do CaveBot", self._map_to_reference)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.map_status = QLabel("Mapeamento parado.")
+        self.map_status.setWordWrap(True)
+        lay.addWidget(self.map_status)
+        self.map_view = QLabel("(mapa vazio)")
+        self.map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.map_view.setMinimumSize(300, 300)
+        self.map_view.setStyleSheet("background:#000; color:#777;")
+        self.map_view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        lay.addWidget(self.map_view, 1)
+        self._map_last_draw = 0.0
+        return w
+
+    # ------------------------------------------------------------ mapa
+    def _map_start(self) -> None:
+        if not self.store.get("regions.minimap"):
+            QMessageBox.information(self, "Mapa", "Defina a região do minimapa na aba Regiões.")
+            return
+        with self.engine.lock:
+            self.engine.mapper.start()
+
+    def _map_stop(self) -> None:
+        with self.engine.lock:
+            self.engine.mapper.stop()
+        self._refresh_map_view(force=True)
+
+    def _map_new_floor(self) -> None:
+        name, ok = QInputDialog.getText(self, "Novo andar", "Nome do andar/segmento (ex.: andar_7):")
+        if not ok:
+            return
+        with self.engine.lock:
+            name = self.engine.mapper.new_floor(name.strip() or None)
+        EVENTS.record("map", "new_floor", f"o próximo print começa o mapa '{name}'")
+
+    def _map_calibrate(self) -> None:
+        with self.engine.lock:
+            fm = self.engine.mapper.floor_map
+        if fm is None:
+            QMessageBox.information(self, "Calibrar", "Inicie o mapeamento e ande um pouco primeiro.")
+            return
+        text, ok = QInputDialog.getText(self, "Calibrar mapa",
+                                        "Coordenada do jogo onde o personagem está AGORA (x, y, z):",
+                                        text="32369, 32241, 7")
+        if not ok:
+            return
+        try:
+            x, y, z = (int(v) for v in text.replace(";", ",").split(","))
+            with self.engine.lock:
+                self.engine.mapper.calibrate(x, y, z)
+        except ValueError:
+            QMessageBox.warning(self, "Calibrar", "Use o formato: x, y, z (ex.: 32369, 32241, 7)")
+
+    def _map_dir(self) -> str:
+        return os.path.join(self.store.get("map.maps_dir", "maps"), self.route.name if self.route else "mapa")
+
+    def _map_save(self) -> None:
+        path = self._map_dir()
+        try:
+            with self.engine.lock:
+                if not self.engine.mapper.floors:
+                    QMessageBox.information(self, "Mapa", "Nenhum mapa montado ainda.")
+                    return
+                files = self.engine.mapper.save(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Mapa", f"Falha ao salvar: {exc}")
+            return
+        QMessageBox.information(self, "Mapa", f"{len(files)} andar(es) salvo(s) em:\n{os.path.abspath(path)}\n\n"
+                                "Os PNGs podem ser abertos em qualquer visualizador de imagens.")
+
+    def _map_load(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Pasta do mapa (com meta.json)")
+        if not path:
+            return
+        try:
+            with self.engine.lock:
+                self.engine.mapper.load(path)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.critical(self, "Mapa", f"Falha ao abrir: {exc}")
+            return
+        self._refresh_map_view(force=True)
+
+    def _map_from_recording(self) -> None:
+        region = Region.from_any(self.store.get("regions.minimap"))
+        if region is None:
+            QMessageBox.information(self, "Mapa", "Defina a região do minimapa na aba Regiões.")
+            return
+        path = QFileDialog.getExistingDirectory(self, "Pasta com prints gravados (PNG/JPG)")
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Vídeo gravado", "", "Vídeos (*.mp4 *.mkv *.avi *.mov);;Todos (*)")
+        if not path:
+            return
+
+        def job() -> None:
+            from map_builder import build_from_frames
+
+            try:
+                with self.engine.lock:
+                    mapper = self.engine.mapper
+                    mapper.stop()  # o mapeamento ao vivo fica pausado enquanto monta
+                    _, counts = build_from_frames(iter_recording(path), region.crop, mapper)
+                    mapper.stop()
+                self.bridge.report.emit("Mapa montado a partir da gravação.\n" +
+                                        "\n".join(f"{k}: {v} print(s)" for k, v in counts.items()) +
+                                        "\n\n(added = encaixado; lost = não encaixou; "
+                                        "new_floor = começou outro andar/segmento)")
+            except Exception as exc:
+                log.exception("falha ao montar o mapa")
+                self.bridge.report.emit(f"Falha ao montar o mapa: {exc}")
+
+        threading.Thread(target=job, name="map-build", daemon=True).start()
+        self.statusBar().showMessage("Montando o mapa a partir da gravação…")
+
+    def _map_to_reference(self) -> None:
+        name = self.map_floor_combo.currentText()
+        if not name:
+            QMessageBox.information(self, "Mapa", "Nenhum mapa montado ainda.")
+            return
+        with self.engine.lock:
+            img, center = self.engine.mapper.reference_for(name)
+        if center is None and QMessageBox.question(
+                self, "Mapa", "Este mapa não foi calibrado: o CaveBot vai reconhecer o local, mas sem "
+                              "coordenadas (x, y, z). Usar assim mesmo?") != QMessageBox.StandardButton.Yes:
+            return
+        with self.engine.lock:
+            ref = self.engine.localizer.library.add(img, f"mapa {name}", center)
+        EVENTS.record("map", "reference", f"mapa '{name}' cadastrado como referência '{ref.id}' do CaveBot"
+                      + (f" (centro {center})" if center else " (sem coordenadas)"))
+        QMessageBox.information(self, "Mapa", f"Referência '{ref.id}' criada.\nNos waypoints, informe as "
+                                "coordenadas (ou adicione esta referência) para o CaveBot reconhecê-los.")
+
+    def _refresh_map_view(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._map_last_draw < 0.5:
+            return
+        self._map_last_draw = now
+        with self.engine.lock:
+            mapper = self.engine.mapper
+            names = list(mapper.floors)
+            current = mapper.current
+            if names != [self.map_floor_combo.itemText(i) for i in range(self.map_floor_combo.count())]:
+                sel = self.map_floor_combo.currentText()
+                self.map_floor_combo.clear()
+                self.map_floor_combo.addItems(names)
+                self.map_floor_combo.setCurrentText(sel if sel in names else (current or ""))
+            view = self.map_floor_combo.currentText() or current
+            if mapper.active and current and view != current and not force:
+                self.map_floor_combo.setCurrentText(current)
+                view = current
+            img = mapper.preview(view) if view else None
+            fm = mapper.floors.get(view) if view else None
+            world = mapper.current_world_position() if view == current else None
+        if img is None:
+            return
+        pix = QPixmap.fromImage(to_qimage(img)).scaled(self.map_view.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.FastTransformation)
+        self.map_view.setPixmap(pix)
+        if fm is not None:
+            info = f"Mapa '{fm.name}': {fm.frames} print(s), {img.shape[1]}x{img.shape[0]} px"
+            info += f", andar {fm.floor}" if fm.floor is not None else ", sem calibração"
+            if world:
+                info += f" | posição atual: {world[0]}, {world[1]}, {world[2]}"
+            self._map_info = info
 
     def _build_logs_tab(self) -> QWidget:
         w = QWidget()
@@ -1087,6 +1275,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Testando a rota com a gravação…")
 
     def _on_report(self, text: str) -> None:
+        self._refresh_map_view(force=True)
         EVENTS.record("cavebot", "observation_report", "teste com gravação concluído")
         dlg = QDialog(self)
         dlg.setWindowTitle("Relatório do modo de observação")
@@ -1155,6 +1344,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ atualização
     def _on_snapshot(self, snap: Snapshot) -> None:
         self.last_snapshot = snap
+        mu = snap.map_update
+        if mu is not None:
+            labels = {"started": "novo mapa iniciado", "added": "print encaixado",
+                      "relocated": "reencontrado no mapa", "lost": "print não encaixou",
+                      "new_floor": "novo andar/segmento", "no_detail": "minimapa sem detalhe"}
+            self._map_info = getattr(self, "_map_info", "")
+            self._refresh_map_view()
+            self.map_status.setText(f"Mapeando — {labels.get(mu.status, mu.status)}"
+                                    f" (semelhança {mu.score:.2f})" + (f": {mu.reason}" if mu.reason else "")
+                                    + (f"\n{self._map_info}" if self._map_info else ""))
+        elif not self.engine.mapper.active and self.engine.mapper.floors:
+            self.map_status.setText("Mapeamento pausado. " + getattr(self, "_map_info", ""))
         if snap.minimap is not None and snap.minimap.size:
             pix = QPixmap.fromImage(to_qimage(snap.minimap)).scaled(
                 self.minimap_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
