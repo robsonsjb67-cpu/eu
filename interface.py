@@ -306,18 +306,11 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("Fonte OBS:"))
         self.source_edit = QComboBox()
         self.source_edit.setEditable(True)
-        self.source_edit.addItems(["0", "1", "2", "obsws://localhost:4455", "srt://127.0.0.1:9000"])
+        self.source_edit.addItems(["0", "1", "2", "3"])
         self.source_edit.setCurrentText(str(self.store.get("capture.source", 0)))
         self.source_edit.setMinimumWidth(220)
-        self.source_edit.setToolTip("Índice da OBS Virtual Camera; obsws://host:4455/Fonte para prints via "
-                                    "obs-websocket; URL de stream; vídeo ou pasta de imagens")
+        self.source_edit.setToolTip("Número da OBS Virtual Camera (0, 1, 2…), vídeo ou pasta de imagens gravadas")
         top.addWidget(self.source_edit)
-        self.obs_password = QLineEdit(self.store.get("capture.obs_password", ""))
-        self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.obs_password.setPlaceholderText("senha WebSocket")
-        self.obs_password.setMaximumWidth(130)
-        self.obs_password.setToolTip("Senha do servidor WebSocket do OBS (só para fontes obsws://)")
-        top.addWidget(self.obs_password)
         btn = QPushButton("Conectar")
         btn.clicked.connect(self.connect_capture)
         top.addWidget(btn)
@@ -645,7 +638,6 @@ class MainWindow(QMainWindow):
         self.disconnect_capture()
         text = self.source_edit.currentText().strip()
         source = int(text) if text.isdigit() else text
-        self.store.set("capture.obs_password", self.obs_password.text(), save=False)
         self.store.set("capture.source", source)
         cfg = self.store.data
 

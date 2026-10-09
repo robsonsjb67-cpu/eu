@@ -31,11 +31,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Para pastas de imagens/vídeos gravados: quadros por segundo da reprodução.
         "playback_fps": 10.0,
         "loop_playback": False,
-        # Prints via obs-websocket (fonte "obsws://host:4455/NomeDaFonte").
-        "obs_password": "",
-        "screenshot_fps": 10.0,
-        "screenshot_format": "jpg",
-        "screenshot_quality": 90,
         # Pasta onde o botão "Print" e a gravação de frames salvam as imagens.
         "screenshots_dir": "prints",
     },

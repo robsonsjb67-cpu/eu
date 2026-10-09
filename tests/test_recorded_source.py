@@ -40,3 +40,11 @@ def test_grabber_plays_recording_then_disconnects(tmp_path):
         assert g.status == CaptureStatus.DISCONNECTED
     finally:
         g.stop()
+
+
+def test_save_screenshot(tmp_path):
+    from obs_capture import save_screenshot
+
+    img = np.random.default_rng(0).integers(0, 255, (40, 60, 3), dtype=np.uint8)
+    path = save_screenshot(img, str(tmp_path / "prints"))
+    assert path.endswith(".png") and np.array_equal(cv2.imread(path), img)
