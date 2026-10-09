@@ -5,7 +5,7 @@ import pytest
 from analysis import AnalysisEngine
 from config import ConfigStore
 from logger import EVENTS
-from obs_capture import CaptureStatus
+from obs_capture import CaptureStatus, FrameGrabber
 from synthetic import HP_REGION, MINIMAP_REGION, frame, world_map
 
 
@@ -75,3 +75,47 @@ def test_gui_smoke(tmp_path, monkeypatch):
         assert img.width() == 640 and img.height() == 360
     finally:
         win.close()
+
+
+def test_gui_print_and_record(tmp_path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as exc:
+        pytest.skip(f"Qt indisponível: {exc}")
+    import time as _time
+
+    import cv2
+
+    from interface import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    st = store(tmp_path)
+    st.set("capture.screenshots_dir", str(tmp_path / "prints"))
+    win = MainWindow(st)
+    try:
+        img = frame(hp=60)
+        win.grabber = FrameGrabber(_NullSource())
+        win.grabber.push(img)
+        win.take_screenshot()
+        shots = list((tmp_path / "prints").glob("*.png"))
+        assert len(shots) == 1 and cv2.imread(str(shots[0])).shape == img.shape
+        win.record_btn.setChecked(True)
+        for i in range(3):
+            win._maybe_record(frame(hp=50 + i), 1000.0 + i)
+        win.record_btn.setChecked(False)
+        rec = next((tmp_path / "prints").glob("gravacao_*"))
+        for _ in range(50):
+            if len(list(rec.glob("*.png"))) == 3:
+                break
+            _time.sleep(0.05)
+        assert len(list(rec.glob("*.png"))) == 3
+    finally:
+        win.grabber = None
+        win.close()
+
+
+class _NullSource:
+    def open(self): return False
+    def read(self): return False, None
+    def close(self): pass

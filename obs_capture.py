@@ -1,7 +1,7 @@
 """Captura independente de frames a partir de uma fonte de vídeo do OBS.
 
-A captura lê a saída de vídeo do OBS (OBS Virtual Camera, um stream local
-SRT/UDP/RTMP ou um arquivo gravado) e nunca toca na janela do jogo: não faz
+A captura lê a saída de vídeo do OBS (OBS Virtual Camera, prints de uma
+fonte via obs-websocket, um stream local SRT/UDP/RTMP ou um arquivo gravado) e nunca toca na janela do jogo: não faz
 screenshot da janela, não muda o foco e não a traz para o primeiro plano.
 
 Uma thread dedicada lê continuamente a fonte e mantém apenas os frames mais
@@ -353,9 +353,169 @@ class RecordedSource:
             self._cap = None
 
 
+class OBSScreenshotSource:
+    """Captura tirando prints de uma fonte/cena pelo obs-websocket (OBS 28+).
+
+    Não precisa da Câmera Virtual: o OBS renderiza a fonte escolhida e devolve
+    a imagem (request ``GetSourceScreenshot`` do protocolo obs-websocket v5).
+    Ative em *Ferramentas → Configurações do Servidor WebSocket* no OBS.
+
+    URL no campo de fonte: ``obsws://[senha@]host[:porta][/NomeDaFonte]``.
+    Sem nome de fonte, usa a cena de programa atual. Sem senha na URL, usa
+    ``capture.obs_password`` da configuração.
+    """
+
+    def __init__(self, host: str = "localhost", port: int = 4455, password: Optional[str] = None,
+                 source_name: Optional[str] = None, fps: float = 10.0, image_format: str = "jpg",
+                 quality: int = 90, width: Optional[int] = None, timeout: float = 3.0,
+                 connect: Optional[Callable[..., object]] = None,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.host, self.port = host, int(port)
+        self.password = password or None
+        self.source_name = source_name or None
+        self.fps = max(0.5, float(fps))
+        self.image_format = image_format
+        self.quality = int(quality)
+        self.width = width
+        self.timeout = timeout
+        self._connect = connect
+        self.sleep = sleep
+        self._ws = None
+        self._req = 0
+        self._next_at = 0.0
+        self.last_error: Optional[str] = None
+
+    @classmethod
+    def from_url(cls, url: str, **kw) -> "OBSScreenshotSource":
+        from urllib.parse import unquote, urlparse
+
+        u = urlparse(url)
+        if u.scheme != "obsws":
+            raise ValueError(f"URL do obs-websocket inválida: {url!r}")
+        password = unquote(u.username) if u.username else kw.pop("password", None)
+        kw.pop("password", None)
+        source = unquote(u.path.lstrip("/")) or kw.pop("source_name", None)
+        kw.pop("source_name", None)
+        return cls(u.hostname or "localhost", u.port or 4455, password, source, **kw)
+
+    @staticmethod
+    def is_obsws(src) -> bool:
+        return isinstance(src, str) and src.lower().startswith("obsws://")
+
+    @staticmethod
+    def auth_string(password: str, salt: str, challenge: str) -> str:
+        import base64
+        import hashlib
+
+        secret = base64.b64encode(hashlib.sha256((password + salt).encode()).digest()).decode()
+        return base64.b64encode(hashlib.sha256((secret + challenge).encode()).digest()).decode()
+
+    # -------------------------------------------------------------- protocolo
+    def _send(self, op: int, d: dict) -> None:
+        import json
+
+        self._ws.send(json.dumps({"op": op, "d": d}))
+
+    def _recv(self) -> dict:
+        import json
+
+        return json.loads(self._ws.recv())
+
+    def _request(self, request_type: str, data: Optional[dict] = None) -> dict:
+        self._req += 1
+        rid = str(self._req)
+        payload = {"requestType": request_type, "requestId": rid}
+        if data:
+            payload["requestData"] = data
+        self._send(6, payload)
+        while True:
+            msg = self._recv()
+            if msg.get("op") == 7 and msg["d"].get("requestId") == rid:
+                status = msg["d"].get("requestStatus", {})
+                if not status.get("result"):
+                    raise RuntimeError(f"{request_type} falhou: {status.get('comment') or status.get('code')}")
+                return msg["d"].get("responseData") or {}
+            # op 5 (eventos) e respostas antigas são ignorados
+
+    def open(self) -> bool:
+        self.close()
+        try:
+            if self._connect is not None:
+                self._ws = self._connect(f"ws://{self.host}:{self.port}", timeout=self.timeout)
+            else:
+                import websocket  # pacote websocket-client
+
+                self._ws = websocket.create_connection(f"ws://{self.host}:{self.port}", timeout=self.timeout)
+            hello = self._recv()
+            if hello.get("op") != 0:
+                raise RuntimeError("resposta inesperada do OBS (esperado Hello)")
+            identify = {"rpcVersion": 1, "eventSubscriptions": 0}
+            auth = hello["d"].get("authentication")
+            if auth:
+                if not self.password:
+                    raise RuntimeError("o OBS exige senha do WebSocket (capture.obs_password)")
+                identify["authentication"] = self.auth_string(self.password, auth["salt"], auth["challenge"])
+            self._send(1, identify)
+            msg = self._recv()
+            if msg.get("op") != 2:
+                raise RuntimeError("OBS recusou a identificação (senha errada?)")
+            if self.source_name is None:
+                data = self._request("GetCurrentProgramScene")
+                self.source_name = data.get("currentProgramSceneName") or data.get("sceneName")
+            self.last_error = None
+            return True
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("obs-websocket: %s", self.last_error)
+            self.close()
+            return False
+
+    def read(self) -> tuple[bool, Optional[np.ndarray]]:
+        import base64
+
+        import cv2
+
+        if self._ws is None:
+            return False, None
+        now = time.monotonic()
+        if self._next_at > now:
+            self.sleep(self._next_at - now)
+        self._next_at = max(now, self._next_at) + 1.0 / self.fps
+        data = {"sourceName": self.source_name, "imageFormat": self.image_format}
+        if self.image_format in ("jpg", "jpeg", "webp"):
+            data["imageCompressionQuality"] = self.quality
+        if self.width:
+            data["imageWidth"] = int(self.width)
+        try:
+            resp = self._request("GetSourceScreenshot", data)
+            b64 = resp["imageData"].split(",", 1)[-1]
+            buf = np.frombuffer(base64.b64decode(b64), np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            log.debug("obs-websocket: falha no print: %s", self.last_error)
+            if "falhou" not in str(exc):  # conexão caiu: força reconexão
+                self.close()
+            return False, None
+        return img is not None, img
+
+    def close(self) -> None:
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+
 def source_from_config(cfg: dict) -> FrameSource:
     c = cfg["capture"]
     src = c["source"]
+    if OBSScreenshotSource.is_obsws(src):
+        return OBSScreenshotSource.from_url(src, password=c.get("obs_password"),
+                                            fps=c.get("screenshot_fps", 10.0),
+                                            image_format=c.get("screenshot_format", "jpg"),
+                                            quality=c.get("screenshot_quality", 90))
     if RecordedSource.is_recording(src):
         return RecordedSource(src, c.get("playback_fps", 10.0), c.get("loop_playback", False))
     return OBSVideoSource(src, c.get("width"), c.get("height"))
@@ -393,3 +553,17 @@ def iter_recording(path: str, step: int = 1):
             i += 1
     finally:
         src.close()
+
+
+def save_screenshot(image: np.ndarray, folder: str = "prints", prefix: str = "obs") -> str:
+    """Salva um frame em PNG (sem perdas) e devolve o caminho."""
+    import os
+
+    import cv2
+
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(folder, f"{prefix}_{stamp}_{int(time.time() * 1000) % 1000:03d}.png")
+    if not cv2.imwrite(path, image):
+        raise OSError(f"falha ao gravar {path}")
+    return path

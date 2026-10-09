@@ -16,7 +16,7 @@ temporizadores de magias.
 |---|---|
 | `main.py` | Ponto de entrada: interface gráfica (padrão) e comandos de linha (observação, análise de gravações). |
 | `interface.py` | Interface PySide6: prévia do OBS, seleção de regiões com o mouse, editor de rotas, estado do CaveBot, Battle List, HP/SIO, temporizadores, logs, alertas e parada de emergência (F12). |
-| `obs_capture.py` | Captura em thread própria (OBS Virtual Camera, stream SRT/UDP, vídeo ou pasta de imagens gravadas), fila dos frames mais recentes, detecção de desconexão e de frames congelados, reconexão automática. |
+| `obs_capture.py` | Captura em thread própria (OBS Virtual Camera, prints via obs-websocket, stream SRT/UDP, vídeo ou pasta de imagens gravadas), prints/gravação de frames, fila dos frames mais recentes, detecção de desconexão e de frames congelados, reconexão automática. |
 | `analysis.py` | Motor que entrega cada frame aos módulos; cada módulo roda isolado (um erro não derruba os outros). |
 | `route_manager.py` | Rotas e waypoints: criar, editar, ordenar, salvar/carregar/renomear/excluir em JSON, validação. |
 | `cave_navigation.py` | Referências do minimapa, estimativa de posição com limiar e checagem de ambiguidade, perda de referência, suspeita de troca de andar, calibração da região. |
@@ -61,6 +61,32 @@ temporizadores de magias.
    - Alternativa: em *Configurações → Transmissão/Gravação* use uma saída local (ex.: SRT)
      e informe a URL (`srt://127.0.0.1:9000`) no campo **Fonte OBS**.
 3. A captura lê apenas o vídeo do OBS: o Tibia pode ficar em segundo plano ou em outro monitor.
+
+### Alternativa: prints do OBS via WebSocket (sem Câmera Virtual)
+
+O OBS 28+ já vem com o obs-websocket. O programa pede ao OBS um print da fonte/cena
+várias vezes por segundo (`GetSourceScreenshot`).
+
+1. No OBS: **Ferramentas → Configurações do Servidor WebSocket** → marque
+   **Ativar servidor WebSocket** (porta padrão 4455). Clique em **Mostrar informações de
+   conexão** para ver a senha.
+2. No campo **Fonte OBS** use:
+   - `obsws://localhost:4455` → print da cena de programa atual;
+   - `obsws://localhost:4455/Tibia` → print só da fonte chamada `Tibia` (recomendado:
+     ignora sobreposições da cena).
+3. Digite a senha no campo **senha WebSocket** ao lado (ou `obsws://SENHA@localhost:4455/Tibia`).
+4. Ajuste em `config.json`: `capture.screenshot_fps` (padrão 10), `screenshot_format`
+   (`jpg` é mais rápido; `png` sem perdas) e `screenshot_quality`.
+
+Se a conexão falhar, o motivo (senha errada, fonte inexistente, servidor desligado)
+aparece no indicador de captura.
+
+### Salvar prints e gravar frames
+
+- **Print** (ou **F9**): salva o frame atual em PNG na pasta `prints/`.
+- **Gravar frames**: salva uma sequência em `prints/gravacao_<data>/` no ritmo de
+  `capture.playback_fps`. Essa pasta pode ser usada em **CaveBot → Testar com gravação…**,
+  em `python main.py observe --recording ...` ou como **Fonte OBS** para reproduzir a sessão.
 
 ## Execução
 
@@ -141,7 +167,7 @@ caminho da captura real. Inclui um teste da interface em modo `offscreen`.
 
 | Sintoma | O que verificar |
 |---|---|
-| "captura: DESCONECTADA" | Câmera Virtual do OBS iniciada? Índice correto (`0`, `1`…)? Outro programa usando a câmera virtual? |
+| "captura: DESCONECTADA" | Câmera Virtual do OBS iniciada? Índice correto (`0`, `1`…)? Outro programa usando a câmera virtual? Com `obsws://`: servidor WebSocket ativado, porta e senha corretas, nome da fonte exato (passe o mouse no indicador para ver o erro). |
 | "captura: CONGELADA" | A fonte do OBS travou (jogo minimizado com *Captura de jogo*?). Ajuste `capture.freeze_seconds`. |
 | Minimapa "sem detalhe" | Região fora do minimapa, ou OBS redimensionado depois da calibração. |
 | CaveBot sempre "confiança baixa" | Cadastre referências mais próximas; confira `pixels_per_sqm`; reduza `match_threshold` com cuidado. |

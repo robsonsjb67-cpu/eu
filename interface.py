@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from typing import Optional
@@ -38,7 +39,8 @@ from cave_navigation import calibration_report
 from cavebot import BotState, failure_summary, run_observation
 from config import ConfigStore
 from logger import EVENTS, Event
-from obs_capture import CaptureStatus, FrameGrabber, grabber_from_config, iter_recording
+from obs_capture import (CaptureStatus, FrameGrabber, grabber_from_config, iter_recording,
+                         save_screenshot)
 from route_manager import WAYPOINT_KINDS, Route, RouteError, RouteManager, Waypoint
 from spell_timers import SpellTimer, TimerState
 from target_fusion import TargetStatus
@@ -258,6 +260,11 @@ class MainWindow(QMainWindow):
         self._preview_index = -1
         self._fps_frames: list[float] = []
         self._timer_widgets: dict[str, dict] = {}
+        self._rec_dir: Optional[str] = None
+        self._rec_count = 0
+        self._rec_last = 0.0
+        self._rec_queue: "queue.Queue[Optional[tuple[str, np.ndarray]]]" = queue.Queue(maxsize=60)
+        threading.Thread(target=self._rec_writer, name="frame-writer", daemon=True).start()
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -299,11 +306,18 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("Fonte OBS:"))
         self.source_edit = QComboBox()
         self.source_edit.setEditable(True)
-        self.source_edit.addItems(["0", "1", "2", "srt://127.0.0.1:9000"])
+        self.source_edit.addItems(["0", "1", "2", "obsws://localhost:4455", "srt://127.0.0.1:9000"])
         self.source_edit.setCurrentText(str(self.store.get("capture.source", 0)))
         self.source_edit.setMinimumWidth(220)
-        self.source_edit.setToolTip("Índice da OBS Virtual Camera, URL de stream, vídeo ou pasta de imagens")
+        self.source_edit.setToolTip("Índice da OBS Virtual Camera; obsws://host:4455/Fonte para prints via "
+                                    "obs-websocket; URL de stream; vídeo ou pasta de imagens")
         top.addWidget(self.source_edit)
+        self.obs_password = QLineEdit(self.store.get("capture.obs_password", ""))
+        self.obs_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.obs_password.setPlaceholderText("senha WebSocket")
+        self.obs_password.setMaximumWidth(130)
+        self.obs_password.setToolTip("Senha do servidor WebSocket do OBS (só para fontes obsws://)")
+        top.addWidget(self.obs_password)
         btn = QPushButton("Conectar")
         btn.clicked.connect(self.connect_capture)
         top.addWidget(btn)
@@ -313,6 +327,16 @@ class MainWindow(QMainWindow):
         btn = QPushButton("Desconectar")
         btn.clicked.connect(self.disconnect_capture)
         top.addWidget(btn)
+        btn = QPushButton("Print")
+        btn.setToolTip("Salva o frame atual em PNG (atalho: F9)")
+        btn.clicked.connect(self.take_screenshot)
+        top.addWidget(btn)
+        QShortcut(QKeySequence("F9"), self, activated=self.take_screenshot)
+        self.record_btn = QPushButton("Gravar frames")
+        self.record_btn.setCheckable(True)
+        self.record_btn.setToolTip("Salva os frames numa pasta para testar rotas depois (modo de observação)")
+        self.record_btn.toggled.connect(self._toggle_recording)
+        top.addWidget(self.record_btn)
         self.capture_label = QLabel("captura: parada")
         self.capture_label.setStyleSheet("padding:4px; color:white; background:#616161;")
         top.addWidget(self.capture_label)
@@ -621,6 +645,7 @@ class MainWindow(QMainWindow):
         self.disconnect_capture()
         text = self.source_edit.currentText().strip()
         source = int(text) if text.isdigit() else text
+        self.store.set("capture.obs_password", self.obs_password.text(), save=False)
         self.store.set("capture.source", source)
         cfg = self.store.data
 
@@ -664,6 +689,7 @@ class MainWindow(QMainWindow):
             return
         self._preview_index = frame.index
         now = time.monotonic()
+        self._maybe_record(frame.image, now)
         self._fps_frames = [t for t in self._fps_frames if now - t < 1.0] + [now]
         self.fps_label.setText(f"{len(self._fps_frames)} fps | {frame.image.shape[1]}x{frame.image.shape[0]}")
         self.preview.show_frame(to_qimage(self._overlay(frame.image)))
@@ -691,10 +717,69 @@ class MainWindow(QMainWindow):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         return out
 
+    # ------------------------------------------------------------ prints
+    def take_screenshot(self) -> None:
+        img = self._latest_image()
+        if img is None:
+            return
+        try:
+            path = save_screenshot(img, self.store.get("capture.screenshots_dir", "prints"))
+        except OSError as exc:
+            QMessageBox.critical(self, "Print", str(exc))
+            return
+        EVENTS.record("capture", "screenshot", f"print salvo em {path}")
+        self.statusBar().showMessage(f"Print salvo: {os.path.abspath(path)}")
+
+    def _toggle_recording(self, on: bool) -> None:
+        if on:
+            if self.grabber is None:
+                QMessageBox.information(self, "Gravar", "Conecte a captura primeiro.")
+                self.record_btn.setChecked(False)
+                return
+            base = self.store.get("capture.screenshots_dir", "prints")
+            self._rec_dir = os.path.join(base, "gravacao_" + time.strftime("%Y%m%d_%H%M%S"))
+            os.makedirs(self._rec_dir, exist_ok=True)
+            self._rec_count = 0
+            self.record_btn.setStyleSheet("background:#c62828; color:white;")
+            EVENTS.record("capture", "recording", f"gravando frames em {self._rec_dir}")
+        else:
+            if self._rec_dir:
+                EVENTS.record("capture", "recording", f"gravação encerrada: {self._rec_count} frame(s) em "
+                              f"{self._rec_dir} (use em CaveBot → Testar com gravação)")
+            self._rec_dir = None
+            self.record_btn.setStyleSheet("")
+
+    def _maybe_record(self, img: np.ndarray, now: float) -> None:
+        if not self._rec_dir:
+            return
+        fps = max(0.5, float(self.store.get("capture.playback_fps", 10.0)))
+        if now - self._rec_last < 1.0 / fps:
+            return
+        self._rec_last = now
+        path = os.path.join(self._rec_dir, f"{self._rec_count:06d}.png")
+        try:
+            self._rec_queue.put_nowait((path, img))
+            self._rec_count += 1
+        except queue.Full:
+            self.statusBar().showMessage("Disco lento: frames de gravação descartados.")
+
+    def _rec_writer(self) -> None:
+        while True:
+            item = self._rec_queue.get()
+            if item is None:
+                return
+            path, img = item
+            if not cv2.imwrite(path, img):
+                log.error("falha ao gravar %s", path)
+
     def _set_capture_label(self, status: CaptureStatus) -> None:
         text = {"connected": "conectada", "frozen": "CONGELADA", "disconnected": "DESCONECTADA",
                 "starting": "iniciando", "stopped": "parada"}[status.value]
         self.capture_label.setText(f"captura: {text}")
+        err = getattr(self.grabber.source, "last_error", None) if self.grabber else None
+        self.capture_label.setToolTip(f"Último erro: {err}" if err else "")
+        if err and status == CaptureStatus.DISCONNECTED:
+            self.capture_label.setText(f"captura: DESCONECTADA — {err[:60]}")
         self.capture_label.setStyleSheet(f"padding:4px; color:white; background:{STATUS_COLORS[status]};")
 
     def _latest_image(self) -> Optional[np.ndarray]:
@@ -1210,6 +1295,8 @@ class MainWindow(QMainWindow):
         self.preview_timer.stop()
         self.ui_timer.stop()
         self.worker.stop()
+        self._rec_dir = None
+        self._rec_queue.put(None)
         if self.grabber:
             self.grabber.stop()
         super().closeEvent(ev)
