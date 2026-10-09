@@ -1,0 +1,4 @@
+opencv-python>=4.8
+numpy>=1.24
+# OCR opcional dos nomes da Battle List (requer o binário do Tesseract instalado)
+pytesseract>=0.3.10
