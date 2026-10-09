@@ -97,8 +97,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hysteresis_percent": 5.0,
         "min_confidence": 0.7,
         "stale_seconds": 1.5,
-        # Faixas HSV (OpenCV, H 0–179) da cor de preenchimento da barra de HP.
-        "fill_hsv_ranges": [[[0, 90, 70], [12, 255, 255]], [[165, 90, 70], [179, 255, 255]]],
+        # Faixas HSV (OpenCV, H 0–179) da cor de preenchimento da barra de HP:
+        # vermelho → amarelo → verde (a barra muda de cor conforme a vida cai).
+        # Azul (mana) fica de fora.
+        "fill_hsv_ranges": [[[0, 90, 70], [90, 255, 255]], [[165, 90, 70], [179, 255, 255]]],
         "column_fill_ratio": 0.5,
         "alert_sound": True,
         "alert_cooldown_seconds": 3.0,

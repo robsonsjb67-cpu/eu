@@ -78,6 +78,10 @@ várias vezes por segundo (`GetSourceScreenshot`).
 4. Ajuste em `config.json`: `capture.screenshot_fps` (padrão 10), `screenshot_format`
    (`jpg` é mais rápido; `png` sem perdas) e `screenshot_quality`.
 
+Exemplo com a fonte padrão do OBS em português: `obsws://localhost:4455/Captura de jogo`
+(o nome pode ter espaços; use exatamente o que aparece na lista **Fontes**). O print da
+fonte vem na resolução real da janela do Tibia, sem as bordas pretas da cena.
+
 Se a conexão falhar, o motivo (senha errada, fonte inexistente, servidor desligado)
 aparece no indicador de captura.
 

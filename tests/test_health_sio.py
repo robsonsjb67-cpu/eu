@@ -122,3 +122,12 @@ def test_sio_with_confirmed_identity_alerts_and_detects_mismatch():
     other[0:60, 0:200] = 0
     other[40:46, 20:140] = frame(sio=30)[40:46, 20:140]
     assert m.update(other, 0.2).identity == Identity.NOT_CONFIRMED
+
+
+@pytest.mark.parametrize("color,pct", [((0, 190, 0), 100), ((0, 200, 220), 55), ((0, 0, 200), 15)])
+def test_hp_bar_any_client_color_but_not_mana(color, pct):
+    # Clientes que pintam a barra de verde/amarelo/vermelho conforme a vida.
+    r = BarReader(HP_RANGES).read(hp_bar(pct, fill=color))
+    assert abs(r.percent - pct) <= 1.0 and r.confidence > 0.95
+    mana = BarReader(HP_RANGES).read(hp_bar(90, fill=(200, 80, 0)))   # azul
+    assert mana.confidence <= 0.3
